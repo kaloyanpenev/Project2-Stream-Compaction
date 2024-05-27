@@ -4,12 +4,9 @@
 #include "efficient.h"
 
 #include <iostream>
-#define blockSize 256
-#define NUM_BANKS 32
+#define blockSize 1024
 #define LOG_NUM_BANKS 5
-
-#define CONFLICT_FREE_OFFSET(n) \
-	((n) >> LOG_NUM_BANKS + (n) >> (2 * LOG_NUM_BANKS))
+#define CONFLICT_FREE_OFFSET(n) ( ((n) >> LOG_NUM_BANKS) + ((n) >> (2 * LOG_NUM_BANKS)) )
 
 namespace StreamCompaction
 {
@@ -30,13 +27,19 @@ namespace StreamCompaction
 			int thid = threadIdx.x;
 
 
-			if (thid >= (n >> 1))
-			{
-				return;
-			}
+			//if (thid >= (n >> 1))
+			//{
+			//	return;
+			//}
+			int ai = thid;
+			int bi = thid + (n >> 1);
+			int bankOffsetA = CONFLICT_FREE_OFFSET(ai);
+			int bankOffsetB = CONFLICT_FREE_OFFSET(bi);
+			const int blockOffset = blockIdx.x * n;
 
-			temp[thid * 2] = idata[(blockIdx.x * blockDim.x + thid) * 2];
-			temp[thid * 2 + 1] = idata[(blockIdx.x * blockDim.x + thid) * 2 + 1];
+
+			temp[ai + bankOffsetA] = idata[blockOffset + ai];
+			temp[bi + bankOffsetB] = idata[blockOffset + bi];
 
 			// Upsweep - d manages the thread occupation, stride manages the binary tree creation
 			int stride = 1;
@@ -47,6 +50,8 @@ namespace StreamCompaction
 				{
 					int rhs = stride * (2 * thid + 2) - 1;
 					int lhs = stride * (2 * thid + 1) - 1;
+					rhs += CONFLICT_FREE_OFFSET(rhs);
+					lhs += CONFLICT_FREE_OFFSET(lhs);
 					temp[rhs] += temp[lhs];
 				}
 				stride <<= 1;
@@ -54,11 +59,13 @@ namespace StreamCompaction
 
 			if (thid == 0) // 0 for exclusive scan
 			{
+				int lastIdx = n - 1;
+				lastIdx += CONFLICT_FREE_OFFSET(lastIdx);
 				if (sumArr)
 				{
-					sumArr[blockIdx.x] = temp[n - 1];
+					sumArr[blockIdx.x] = temp[lastIdx];
 				}
-				temp[n - 1] = 0;
+				temp[lastIdx] = 0;
 			}
 
 			// Downsweep
@@ -71,14 +78,19 @@ namespace StreamCompaction
 				{
 					int rhs = stride * (2 * thid + 2) - 1;
 					int lhs = stride * (2 * thid + 1) - 1;
+					rhs += CONFLICT_FREE_OFFSET(rhs);
+					lhs += CONFLICT_FREE_OFFSET(lhs);
+
 					int rhsCopy = temp[rhs];
 					temp[rhs] += temp[lhs];
 					temp[lhs] = rhsCopy;
 				}
 			}
 
-			odata[(blockIdx.x * blockDim.x + thid) * 2] = temp[thid * 2];
-			odata[(blockIdx.x * blockDim.x + thid) * 2 + 1] = temp[thid * 2 + 1];
+			__syncthreads();
+
+			odata[blockOffset + ai] = temp[ai + bankOffsetA];
+			odata[blockOffset + bi] = temp[bi + bankOffsetB];
 			*time = clock() - cl;
 		}
 
@@ -106,8 +118,6 @@ namespace StreamCompaction
 			const int gridSizeL3 = 1 + (gridSizeL2 - 1) / (blockSize * 2);
 
 
-			// TEMP DELETE
-			const int gridSize = (n + blockSize - 1) / blockSize;
 			// Setup arrays
 			int* d_odata;
 			cudaMalloc((void**)&d_odata, n * sizeof(int));
@@ -146,14 +156,16 @@ namespace StreamCompaction
 
 			if (gridSizeL1 == 1)
 			{
-				SelfMadeEfficientScan << < gridSizeL1 /* = 1 */, n, n * sizeof(int) >> > (d_idata, d_odata, n, d_SumsL1, d_time);
+				SelfMadeEfficientScan << < gridSizeL1 /* = 1 */, n, n * sizeof(int)* LOG_NUM_BANKS >> > (d_idata, d_odata, n, nullptr, d_time);
+
 			}
 			else if (gridSizeL2 == 1)
 			{
-				SelfMadeEfficientScan << < gridSizeL1, blockSize, blockSize * sizeof(int) * 2 >> > (d_idata, d_odata, blockSize * 2, d_SumsL1, d_time);
+				SelfMadeEfficientScan << < gridSizeL1, blockSize, blockSize * sizeof(int) * 2 * (LOG_NUM_BANKS - 1) >> > (d_idata, d_odata, blockSize * 2, d_SumsL1, d_time);
 
 				checkCUDAError("cudaMalloc dev_posCPYPRIOR failed!");
-				SelfMadeEfficientScan << < gridSizeL2 /* = 1 */, blockSize, blockSize * sizeof(int) * 2 >> > (d_SumsL1, d_IncrL1, blockSize * 2, d_SumsL2, d_time);
+				SelfMadeEfficientScan << < gridSizeL2 /* = 1 */, blockSize, blockSize * sizeof(int) * 2 * (LOG_NUM_BANKS) >> > (d_SumsL1, d_IncrL1, blockSize * 2, nullptr, d_time);
+
 				checkCUDAError("cudaMalloc dev_posCPYPRIOR failed!");
 				Common::kernAdd << <gridSizeL1, blockSize >> > (d_odata, d_IncrL1);
 				cudaDeviceSynchronize();
@@ -162,9 +174,9 @@ namespace StreamCompaction
 			else
 			{
 				// TODO: Expand to N levels
-				SelfMadeEfficientScan << < gridSizeL1, blockSize, blockSize * sizeof(int) * 2 >> > (d_idata, d_odata, blockSize * 2, d_SumsL1, d_time);
-				SelfMadeEfficientScan << < gridSizeL2, blockSize, blockSize * sizeof(int) * 2 >> > (d_SumsL1, d_IncrL1, blockSize * 2, d_SumsL2, d_time);
-				SelfMadeEfficientScan << < gridSizeL3, blockSize, blockSize * sizeof(int) * 2 >> > (d_SumsL2, d_IncrL2, blockSize * 2, nullptr, d_time);
+				SelfMadeEfficientScan << < gridSizeL1, blockSize, blockSize * sizeof(int) * 2 * (LOG_NUM_BANKS) >> > (d_idata, d_odata, blockSize * 2, d_SumsL1, d_time);
+				SelfMadeEfficientScan << < gridSizeL2, blockSize, blockSize * sizeof(int) * 2 * (LOG_NUM_BANKS) >> > (d_SumsL1, d_IncrL1, blockSize * 2, d_SumsL2, d_time);
+				SelfMadeEfficientScan << < gridSizeL3, blockSize, blockSize * sizeof(int) * 2 * (LOG_NUM_BANKS) >> > (d_SumsL2, d_IncrL2, blockSize * 2, nullptr, d_time);
 
 				Common::kernAdd << <gridSizeL2, blockSize >> > (d_IncrL1, d_IncrL2);
 				Common::kernAdd << <gridSizeL1, blockSize >> > (d_odata, d_IncrL1);
