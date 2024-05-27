@@ -6,7 +6,7 @@ This is an implementation of Parallel Prefix Sum (Scan) with CUDA, using the UPe
 
 The aim of this repo is for me to get a better understanding of GPU architecture in the context of a common GPGPU algorithm and exercise how it works in practice.
 
-NOTE: There is an exorbitant amount of mistakes in the GPU Gems chapter ([with even the author coming forward and admitting the code should not be used](https://stackoverflow.com/a/9694697)) so I would highly advise against using it. This should be a bit of a better reference for some points, but I have still only played around with it for educational purposes and definitely wouldn't say it is a good example. 
+NOTE: There is an exorbitant amount of mistakes in the GPU Gems chapter ([with even the author coming forward and admitting the code should not be used](https://stackoverflow.com/a/9694697)) so I would highly advise against using it. This repo can be a bit of a better reference for some points, as I have conceptually followed the GPU gems chapter, but I have still only played around with it for educational purposes and definitely wouldn't say it is a good example. 
 
 The scan implementation works similar to `thrust:exclusive_scan` and in my testing on an RTX 2060, it achieves similar performance
 The application was profiled with NSight compute and very few significant performance bottlenecks were identified.
